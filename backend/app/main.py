@@ -740,6 +740,14 @@ def _detect_video(data: bytes) -> tuple[str, str]:
     return "mp4", "video/mp4"
 
 
+def _video_prompt(project: dict, shot: dict) -> str:
+    base = shot["prompt"] or shot["description"] or shot["location"]
+    return (
+        f"{base}。{project['style']}，{shot['shot_type']}，{shot['camera']}运镜，"
+        f"电影级质感，光影自然，竖屏 {project['ratio']} 短剧画面。"
+    )
+
+
 def _store_video(conn, project: dict, shot: dict, content: bytes, sid: str) -> dict:
     ext, mime = _detect_video(content)
     asset = _save_asset(conn, project["id"], "video", f"AI视频 · 镜头{shot['idx']}",
@@ -761,11 +769,7 @@ def generate_shot_video(sid: str, request: Request):
         project = _project_or_404(conn, episode["project_id"])
         if ai.is_demo(cfg):
             raise HTTPException(400, "演示模式不调用云端视频。请在 AI 设置里填入支持文生视频的 OpenAI 兼容服务。")
-        base = shot["prompt"] or shot["description"] or shot["location"]
-        prompt = (
-            f"{base}。{project['style']}，{shot['shot_type']}，{shot['camera']}运镜，"
-            f"电影级质感，光影自然，竖屏 {project['ratio']} 短剧画面。"
-        )
+        prompt = _video_prompt(project, shot)
         try:
             job = ai.create_video(cfg, prompt, float(shot["duration"] or 8), project["ratio"])
         except ai.AIError as exc:
@@ -789,6 +793,55 @@ def generate_shot_video(sid: str, request: Request):
         _touch(conn, project["id"])
         return {"job_id": job_id, "status": status, "progress": progress, "message": "",
                 "shot": _shot_dict(_shot_or_404_conn(conn, sid))}
+
+
+@app.post("/api/episodes/{eid}/generate/videos")
+def generate_episode_videos(eid: str, request: Request):
+    cfg = cfg_of(request)
+    with db() as conn:
+        episode = _episode_or_404(conn, eid)
+        project = _project_or_404(conn, episode["project_id"])
+        if ai.is_demo(cfg):
+            raise HTTPException(400, "演示模式不调用云端视频。请在 AI 设置里填入支持文生视频的 OpenAI 兼容服务。")
+        shots = [dict(row) for row in conn.execute(
+            "SELECT * FROM shots WHERE episode_id = ? ORDER BY idx", (eid,)
+        ).fetchall()]
+        if not shots:
+            raise HTTPException(400, "这一集还没有分镜")
+        submitted = 0
+        skipped = 0
+        errors = []
+        for shot in shots:
+            if shot["video_asset"] or shot["video_job"]:
+                skipped += 1
+                continue
+            try:
+                job = ai.create_video(cfg, _video_prompt(project, shot),
+                                      float(shot["duration"] or 8), project["ratio"])
+            except ai.AIError as exc:
+                errors.append({"shot_idx": shot["idx"], "message": str(exc)})
+                continue
+            job_id = str(job.get("id") or job.get("task_id") or job.get("video_id") or "")
+            if not job_id:
+                url = str(job.get("url") or job.get("video_url") or job.get("download_url") or "")
+                if url:
+                    try:
+                        content = ai.download_video(cfg, "", url)
+                    except ai.AIError as exc:
+                        errors.append({"shot_idx": shot["idx"], "message": str(exc)})
+                        continue
+                    _store_video(conn, project, shot, content, shot["id"])
+                    submitted += 1
+                    continue
+                errors.append({"shot_idx": shot["idx"], "message": "视频接口没有返回任务 ID"})
+                continue
+            status, _ = _video_state(job)
+            conn.execute("UPDATE shots SET video_job = ?, video_status = ? WHERE id = ?",
+                         (job_id, status, shot["id"]))
+            submitted += 1
+        if submitted:
+            _touch(conn, project["id"])
+        return {"submitted": submitted, "skipped": skipped, "errors": errors}
 
 
 @app.get("/api/shots/{sid}/video-status")

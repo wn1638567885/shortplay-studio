@@ -83,6 +83,11 @@ export const apiClient = {
     api<{ status: string; progress: number; message?: string; asset?: Asset; shot: Shot }>(
       `/api/shots/${sid}/video-status`,
     ),
+  generateEpisodeVideos: (eid: string) =>
+    api<{ submitted: number; skipped: number; errors: { shot_idx: number; message: string }[] }>(
+      `/api/episodes/${eid}/generate/videos`,
+      { method: "POST" },
+    ),
   updateCharacter: (cid: string, body: Record<string, unknown>) =>
     api<Character>(`/api/characters/${cid}`, { method: "PATCH", body: JSON.stringify(body) }),
   createCharacter: (body: Record<string, unknown>) =>

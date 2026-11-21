@@ -546,6 +546,28 @@ function StoryboardTab({
   const generate = () =>
     run("board", () => apiClient.generateStoryboard(episode.id), "分镜已生成");
 
+  const batchVideo = async () => {
+    if (demoMode) {
+      notify("演示模式不调用云端视频，请先在 AI 设置中接入文生视频模型", "err");
+      openSettings();
+      return;
+    }
+    if (!episode.shots.length) {
+      notify("这一集还没有分镜", "err");
+      return;
+    }
+    if (!window.confirm("将为该集还没有视频的镜头依次提交生成任务，继续？")) return;
+    const res = await run("batch-video", () => apiClient.generateEpisodeVideos(episode.id));
+    if (!res) return;
+    if (res.errors?.length) {
+      notify(`已提交 ${res.submitted} 个，${res.errors.length} 个失败：${res.errors[0].message}`, "err");
+    } else if (res.submitted) {
+      notify(`已提交 ${res.submitted} 个镜头视频任务，正在生成…`, "ok");
+    } else {
+      notify("该集所有镜头都已有视频或正在生成", "ok");
+    }
+  };
+
   return (
     <div className="storyboard-tab">
       <EpisodeChips episodes={detail.episodes} active={epId} onPick={setEpId} color={color} />
@@ -556,10 +578,15 @@ function StoryboardTab({
           </h3>
           <p className="muted small">景别、运镜、台词和绘图提示词都可以逐镜修改。</p>
         </div>
-        <button className="btn primary sm" onClick={generate} disabled={!!busy}>
-          {busy === "board" && <Spinner />}
-          {episode.shots.length ? "重新拆分镜" : "生成这一集分镜"}
-        </button>
+        <div className="row-actions">
+          <button className="btn ghost sm" onClick={batchVideo} disabled={!!busy || !episode.shots.length}>
+            {busy === "batch-video" ? <Spinner /> : "🎥"} 整集生成视频
+          </button>
+          <button className="btn primary sm" onClick={generate} disabled={!!busy}>
+            {busy === "board" && <Spinner />}
+            {episode.shots.length ? "重新拆分镜" : "生成这一集分镜"}
+          </button>
+        </div>
       </div>
 
       {demoMode && (
@@ -649,8 +676,8 @@ function ShotCard({
   const videoActive = ["queued", "in_progress", "processing"].includes(videoStatus);
 
   useEffect(() => {
-    setVideo({ status: shot.video_status || "", progress: 0 });
-  }, [shot.id]);
+    if (shot.video_status) setVideo({ status: shot.video_status, progress: 0 });
+  }, [shot.id, shot.video_status]);
 
   useEffect(() => {
     if (!videoActive) return;
