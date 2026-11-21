@@ -100,6 +100,8 @@ export type Episode = {
   summary: string;
   script: string;
   status: string;
+  final_asset: string;
+  final_video_url: string;
   shots: Shot[];
   shot_count: number;
 };

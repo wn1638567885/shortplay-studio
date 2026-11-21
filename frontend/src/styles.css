@@ -1158,6 +1158,19 @@ button {
   background: rgba(255, 107, 74, 0.12);
 }
 
+.final-video {
+  margin-bottom: 16px;
+}
+
+.final-video video {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  margin-top: 10px;
+  border-radius: 10px;
+  background: #000;
+}
+
 .shot-audio {
   width: 100%;
   margin-top: 10px;

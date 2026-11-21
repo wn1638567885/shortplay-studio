@@ -3,6 +3,9 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -120,6 +123,16 @@ def _shot_dict(row) -> dict:
     }
 
 
+def _episode_dict(row) -> dict:
+    row = dict(row)
+    final = row.get("final_asset") or ""
+    return {
+        **row,
+        "final_asset": final,
+        "final_video_url": f"/api/assets/{final}/raw" if final else "",
+    }
+
+
 def _project_dict(row) -> dict:
     row = dict(row)
     cover = row.pop("cover_id", None)
@@ -138,7 +151,7 @@ def _detail(conn, pid: str) -> dict:
     for ep in conn.execute(
         "SELECT * FROM episodes WHERE project_id = ? ORDER BY idx", (pid,)
     ).fetchall():
-        ep = dict(ep)
+        ep = _episode_dict(ep)
         shots = [_shot_dict(r) for r in conn.execute(
             "SELECT * FROM shots WHERE episode_id = ? ORDER BY idx", (ep["id"],)
         ).fetchall()]
@@ -468,7 +481,7 @@ def update_episode(eid: str, payload: dict = Body(...)):
             sets = ", ".join(f"{k} = ?" for k in fields)
             conn.execute(f"UPDATE episodes SET {sets} WHERE id = ?", (*fields.values(), eid))
             _touch(conn, episode["project_id"])
-        return _episode_or_404(conn, eid)
+        return _episode_dict(_episode_or_404(conn, eid))
 
 
 @app.post("/api/episodes/{eid}/generate/script")
@@ -599,7 +612,7 @@ def generate_storyboard(eid: str, request: Request):
         shots_out = [_shot_dict(r) for r in conn.execute(
             "SELECT * FROM shots WHERE episode_id = ? ORDER BY idx", (eid,)
         ).fetchall()]
-        return {**episode, "shots": shots_out, "shot_count": len(shots_out),
+        return {**_episode_dict(episode), "shots": shots_out, "shot_count": len(shots_out),
                 "source": source, "warning": warning}
 
 
@@ -710,6 +723,36 @@ def generate_shot_voice(sid: str, request: Request):
         conn.execute("UPDATE shots SET audio_asset = ? WHERE id = ?", (asset["id"], sid))
         _touch(conn, project["id"])
         return {"asset": asset, "shot": _shot_dict(_shot_or_404_conn(conn, sid)), "source": "ai"}
+
+
+_RATIO_SIZE = {
+    "9:16": (720, 1280),
+    "16:9": (1280, 720),
+    "1:1": (720, 720),
+    "4:3": (960, 720),
+}
+
+
+def _has_audio(path: str) -> bool:
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries",
+             "stream=index", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return bool(proc.stdout.strip())
+
+
+def _run_ffmpeg(args: list[str], cwd: str) -> None:
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HTTPException(400, f"视频拼接失败：{exc}") from exc
+    if proc.returncode != 0:
+        lines = (proc.stderr or "").strip().splitlines()
+        raise HTTPException(400, f"视频拼接失败：{lines[-1] if lines else proc.returncode}")
 
 
 def _video_state(data: dict) -> tuple[str, int]:
@@ -842,6 +885,69 @@ def generate_episode_videos(eid: str, request: Request):
         if submitted:
             _touch(conn, project["id"])
         return {"submitted": submitted, "skipped": skipped, "errors": errors}
+
+
+@app.post("/api/episodes/{eid}/generate/final")
+def generate_episode_final(eid: str):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(400, "服务器未安装 ffmpeg，暂时无法拼接成片")
+    ffprobe = shutil.which("ffprobe")
+    with db() as conn:
+        episode = _episode_or_404(conn, eid)
+        project = _project_or_404(conn, episode["project_id"])
+        shots = [dict(row) for row in conn.execute(
+            "SELECT * FROM shots WHERE episode_id = ? ORDER BY idx", (eid,)
+        ).fetchall()]
+        if not shots:
+            raise HTTPException(400, "这一集还没有分镜")
+        missing = [s["idx"] for s in shots if not s["video_asset"]]
+        if missing:
+            raise HTTPException(
+                400, "还有镜头没有视频：第 " + "、".join(str(i) for i in missing) + " 镜，请先生成或上传")
+        paths = []
+        for shot in shots:
+            asset = conn.execute("SELECT * FROM assets WHERE id = ?", (shot["video_asset"],)).fetchone()
+            path = os.path.join(ASSET_DIR, asset["filename"]) if asset else ""
+            if not path or not os.path.exists(path):
+                raise HTTPException(400, f"镜头{shot['idx']}的视频文件已丢失，请重新生成或上传")
+            paths.append(path)
+        width, height = _RATIO_SIZE.get(project["ratio"], (720, 1280))
+        with tempfile.TemporaryDirectory() as tmp:
+            normalized = []
+            for i, src in enumerate(paths, start=1):
+                dst = os.path.join(tmp, f"seg_{i:03d}.mp4")
+                args = [ffmpeg, "-y", "-i", src]
+                if ffprobe and _has_audio(src):
+                    args += ["-map", "0:v:0", "-map", "0:a:0"]
+                elif ffprobe:
+                    args += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                             "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+                args += [
+                    "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                           f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                    dst,
+                ]
+                _run_ffmpeg(args, tmp)
+                normalized.append(dst)
+            listfile = os.path.join(tmp, "list.txt")
+            with open(listfile, "w", encoding="utf-8") as fh:
+                for path in normalized:
+                    fh.write("file '" + path + "'\n")
+            out = os.path.join(tmp, "final.mp4")
+            _run_ffmpeg([
+                ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", listfile,
+                "-c", "copy", "-movflags", "+faststart", out,
+            ], tmp)
+            with open(out, "rb") as fh:
+                content = fh.read()
+        asset = _save_asset(conn, project["id"], "video", f"第{episode['idx']}集 · 成片",
+                            content, "mp4", "video/mp4", "render")
+        conn.execute("UPDATE episodes SET final_asset = ? WHERE id = ?", (asset["id"], eid))
+        _touch(conn, project["id"])
+        return {"asset": asset, "episode": _episode_dict(_episode_or_404(conn, eid))}
 
 
 @app.get("/api/shots/{sid}/video-status")
@@ -985,6 +1091,7 @@ def delete_asset(aid: str):
         for column in ("image_asset", "video_asset", "audio_asset"):
             conn.execute(f"UPDATE shots SET {column} = '' WHERE {column} = ?", (aid,))
         conn.execute("UPDATE characters SET image_asset = '' WHERE image_asset = ?", (aid,))
+        conn.execute("UPDATE episodes SET final_asset = '' WHERE final_asset = ?", (aid,))
         conn.execute("DELETE FROM assets WHERE id = ?", (aid,))
         try:
             os.remove(os.path.join(ASSET_DIR, row["filename"]))

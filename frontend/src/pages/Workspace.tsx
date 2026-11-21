@@ -568,6 +568,15 @@ function StoryboardTab({
     }
   };
 
+  const combineFinal = async () => {
+    if (!episode.shots.every((s) => s.video_asset)) {
+      notify("还有镜头没有视频，请先生成或上传全部镜头视频", "err");
+      return;
+    }
+    if (!window.confirm("将把该集全部镜头视频按顺序拼接为一个成片，继续？")) return;
+    await run("final-video", () => apiClient.generateEpisodeFinal(episode.id), "整集成片已合成");
+  };
+
   return (
     <div className="storyboard-tab">
       <EpisodeChips episodes={detail.episodes} active={epId} onPick={setEpId} color={color} />
@@ -582,6 +591,13 @@ function StoryboardTab({
           <button className="btn ghost sm" onClick={batchVideo} disabled={!!busy || !episode.shots.length}>
             {busy === "batch-video" ? <Spinner /> : "🎥"} 整集生成视频
           </button>
+          <button
+            className="btn ghost sm"
+            onClick={combineFinal}
+            disabled={!!busy || !episode.shots.length}
+          >
+            {busy === "final-video" ? <Spinner /> : "🎬"} 合成整集成片
+          </button>
           <button className="btn primary sm" onClick={generate} disabled={!!busy}>
             {busy === "board" && <Spinner />}
             {episode.shots.length ? "重新拆分镜" : "生成这一集分镜"}
@@ -595,6 +611,18 @@ function StoryboardTab({
           <button className="link-btn" onClick={openSettings}>
             去设置
           </button>
+        </div>
+      )}
+
+      {episode.final_video_url && (
+        <div className="card final-video">
+          <div className="card-head">
+            <h3>第 {episode.idx} 集成片</h3>
+            <a className="link-btn" href={episode.final_video_url} download={`第${episode.idx}集成片.mp4`}>
+              下载成片
+            </a>
+          </div>
+          <video src={episode.final_video_url} controls playsInline />
         </div>
       )}
 

@@ -88,6 +88,8 @@ export const apiClient = {
       `/api/episodes/${eid}/generate/videos`,
       { method: "POST" },
     ),
+  generateEpisodeFinal: (eid: string) =>
+    api<{ asset: Asset; episode: Episode }>(`/api/episodes/${eid}/generate/final`, { method: "POST" }),
   updateCharacter: (cid: string, body: Record<string, unknown>) =>
     api<Character>(`/api/characters/${cid}`, { method: "PATCH", body: JSON.stringify(body) }),
   createCharacter: (body: Record<string, unknown>) =>
