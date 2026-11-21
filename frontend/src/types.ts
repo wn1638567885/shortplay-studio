@@ -102,6 +102,8 @@ export type Episode = {
   status: string;
   final_asset: string;
   final_video_url: string;
+  bgm_asset: string;
+  bgm_url: string;
   shots: Shot[];
   shot_count: number;
 };

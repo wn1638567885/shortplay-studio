@@ -88,8 +88,21 @@ export const apiClient = {
       `/api/episodes/${eid}/generate/videos`,
       { method: "POST" },
     ),
-  generateEpisodeFinal: (eid: string) =>
-    api<{ asset: Asset; episode: Episode }>(`/api/episodes/${eid}/generate/final`, { method: "POST" }),
+  generateEpisodeFinal: (eid: string, opts: { subtitles?: boolean } = {}) =>
+    api<{ asset: Asset; episode: Episode }>(`/api/episodes/${eid}/generate/final`, {
+      method: "POST",
+      body: JSON.stringify(opts),
+    }),
+  uploadEpisodeMusic: (eid: string, file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return api<{ asset: Asset; episode: Episode }>(`/api/episodes/${eid}/upload/music`, {
+      method: "POST",
+      body: fd,
+    });
+  },
+  deleteEpisodeMusic: (eid: string) =>
+    api<{ episode: Episode }>(`/api/episodes/${eid}/music`, { method: "DELETE" }),
   updateCharacter: (cid: string, body: Record<string, unknown>) =>
     api<Character>(`/api/characters/${cid}`, { method: "PATCH", body: JSON.stringify(body) }),
   createCharacter: (body: Record<string, unknown>) =>

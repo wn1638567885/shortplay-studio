@@ -538,6 +538,7 @@ function StoryboardTab({
 }) {
   const { openSettings } = useApp();
   const color = GENRE_COLORS[detail.project.genre] || "#ff6b4a";
+  const [withSubs, setWithSubs] = useState(true);
 
   if (!episode) {
     return <Empty icon="🎬" title="还没有分集" desc="先回到总览生成整体大纲。" />;
@@ -574,8 +575,20 @@ function StoryboardTab({
       return;
     }
     if (!window.confirm("将把该集全部镜头视频按顺序拼接为一个成片，继续？")) return;
-    await run("final-video", () => apiClient.generateEpisodeFinal(episode.id), "整集成片已合成");
+    await run(
+      "final-video",
+      () => apiClient.generateEpisodeFinal(episode.id, { subtitles: withSubs }),
+      "整集成片已合成",
+    );
   };
+
+  const uploadMusic = (file?: File) => {
+    if (!file) return;
+    run("music", () => apiClient.uploadEpisodeMusic(episode.id, file), "配乐已上传，合成时会自动混入");
+  };
+
+  const removeMusic = () =>
+    run("music", () => apiClient.deleteEpisodeMusic(episode.id), "配乐已移除");
 
   return (
     <div className="storyboard-tab">
@@ -613,6 +626,33 @@ function StoryboardTab({
           </button>
         </div>
       )}
+
+      <div className="post-bar">
+        <label className="check-inline">
+          <input type="checkbox" checked={withSubs} onChange={(e) => setWithSubs(e.target.checked)} />
+          烧录台词字幕
+        </label>
+        <span className="muted small">配乐以 25% 音量混入</span>
+        <label className="btn ghost sm file-btn">
+          {busy === "music" ? <Spinner /> : episode.bgm_url ? "更换配乐" : "上传配乐"}
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={(e) => {
+              uploadMusic(e.target.files?.[0]);
+              e.target.value = "";
+            }}
+          />
+        </label>
+        {episode.bgm_url && (
+          <>
+            <audio className="ep-music" src={episode.bgm_url} controls />
+            <button className="link-btn" onClick={removeMusic} disabled={busy === "music"}>
+              移除配乐
+            </button>
+          </>
+        )}
+      </div>
 
       {episode.final_video_url && (
         <div className="card final-video">

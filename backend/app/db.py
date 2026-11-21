@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     script TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT '待生成',
     final_asset TEXT NOT NULL DEFAULT '',
+    bgm_asset TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -118,5 +119,6 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE shots ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
         # 老库平滑升级：补上整集成片字段
         ep_columns = {row[1] for row in conn.execute("PRAGMA table_info(episodes)").fetchall()}
-        if "final_asset" not in ep_columns:
-            conn.execute("ALTER TABLE episodes ADD COLUMN final_asset TEXT NOT NULL DEFAULT ''")
+        for name in ("final_asset", "bgm_asset"):
+            if name not in ep_columns:
+                conn.execute(f"ALTER TABLE episodes ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")

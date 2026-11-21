@@ -126,10 +126,13 @@ def _shot_dict(row) -> dict:
 def _episode_dict(row) -> dict:
     row = dict(row)
     final = row.get("final_asset") or ""
+    bgm = row.get("bgm_asset") or ""
     return {
         **row,
         "final_asset": final,
         "final_video_url": f"/api/assets/{final}/raw" if final else "",
+        "bgm_asset": bgm,
+        "bgm_url": f"/api/assets/{bgm}/raw" if bgm else "",
     }
 
 
@@ -745,6 +748,59 @@ def _has_audio(path: str) -> bool:
     return bool(proc.stdout.strip())
 
 
+def _media_duration(path: str) -> float:
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60,
+        )
+        return float(proc.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0.0
+
+
+def _ass_time(seconds: float) -> str:
+    cs = max(0, int(round(seconds * 100)))
+    hours, rem = divmod(cs, 360000)
+    minutes, rem = divmod(rem, 6000)
+    secs, cs = divmod(rem, 100)
+    return f"{hours}:{minutes:02d}:{secs:02d}.{cs:02d}"
+
+
+def _build_ass(shots: list[dict], durations: list[float], width: int, height: int) -> str:
+    fontsize = max(24, int(round(min(width, height) * 0.047)))
+    margin_v = max(40, int(round(height * 0.08)))
+    lines = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {width}",
+        f"PlayResY: {height}",
+        "WrapStyle: 0",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour,"
+        " Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline,"
+        " Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,Noto Sans CJK SC,{fontsize},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,"
+        f"0,0,0,0,100,100,0,0,1,2,1,2,60,60,{margin_v},1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    start = 0.0
+    for shot, duration in zip(shots, durations):
+        end = start + max(duration, 0.3)
+        text = " ".join((shot.get("dialogue") or "").split())
+        if text:
+            text = text.replace("{", "（").replace("}", "）")
+            lines.append(
+                f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},Default,,0,0,0,,{text}"
+            )
+        start = end
+    return "\n".join(lines) + "\n"
+
+
 def _run_ffmpeg(args: list[str], cwd: str) -> None:
     try:
         proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=600)
@@ -888,11 +944,12 @@ def generate_episode_videos(eid: str, request: Request):
 
 
 @app.post("/api/episodes/{eid}/generate/final")
-def generate_episode_final(eid: str):
+def generate_episode_final(eid: str, payload: dict | None = Body(None)):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise HTTPException(400, "服务器未安装 ffmpeg，暂时无法拼接成片")
     ffprobe = shutil.which("ffprobe")
+    payload = payload or {}
     with db() as conn:
         episode = _episode_or_404(conn, eid)
         project = _project_or_404(conn, episode["project_id"])
@@ -912,9 +969,16 @@ def generate_episode_final(eid: str):
             if not path or not os.path.exists(path):
                 raise HTTPException(400, f"镜头{shot['idx']}的视频文件已丢失，请重新生成或上传")
             paths.append(path)
+        bgm_path = ""
+        if episode.get("bgm_asset"):
+            bgm = conn.execute("SELECT * FROM assets WHERE id = ?", (episode["bgm_asset"],)).fetchone()
+            bgm_path = os.path.join(ASSET_DIR, bgm["filename"]) if bgm else ""
+            if not bgm_path or not os.path.exists(bgm_path):
+                raise HTTPException(400, "本集配乐文件已丢失，请重新上传")
         width, height = _RATIO_SIZE.get(project["ratio"], (720, 1280))
         with tempfile.TemporaryDirectory() as tmp:
             normalized = []
+            durations = []
             for i, src in enumerate(paths, start=1):
                 dst = os.path.join(tmp, f"seg_{i:03d}.mp4")
                 args = [ffmpeg, "-y", "-i", src]
@@ -932,15 +996,45 @@ def generate_episode_final(eid: str):
                 ]
                 _run_ffmpeg(args, tmp)
                 normalized.append(dst)
+                durations.append(_media_duration(dst))
             listfile = os.path.join(tmp, "list.txt")
             with open(listfile, "w", encoding="utf-8") as fh:
                 for path in normalized:
                     fh.write("file '" + path + "'\n")
-            out = os.path.join(tmp, "final.mp4")
+            out = os.path.join(tmp, "raw.mp4")
             _run_ffmpeg([
                 ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", listfile,
-                "-c", "copy", "-movflags", "+faststart", out,
+                "-c", "copy", out,
             ], tmp)
+            ass_path = ""
+            if payload.get("subtitles", True) and any((s["dialogue"] or "").strip() for s in shots):
+                ass_path = os.path.join(tmp, "subs.ass")
+                with open(ass_path, "w", encoding="utf-8") as fh:
+                    fh.write(_build_ass(shots, durations, width, height))
+            if ass_path or bgm_path:
+                filters = []
+                args = [ffmpeg, "-y", "-i", out]
+                if bgm_path:
+                    args += ["-stream_loop", "-1", "-i", bgm_path]
+                if ass_path:
+                    filters.append(f"[0:v]subtitles=filename='{ass_path}'[v]")
+                maps = [] if ass_path else ["-map", "0:v:0"]
+                if bgm_path:
+                    filters.append(
+                        "[1:a]volume=0.25[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=0[a]")
+                    maps += ["-map", "[a]"]
+                else:
+                    maps += ["-map", "0:a:0"]
+                if ass_path:
+                    maps = ["-map", "[v]"] + maps
+                final = os.path.join(tmp, "final.mp4")
+                _run_ffmpeg(args + [
+                    "-filter_complex", ";".join(filters), *maps,
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+                    "-movflags", "+faststart", final,
+                ], tmp)
+                out = final
             with open(out, "rb") as fh:
                 content = fh.read()
         asset = _save_asset(conn, project["id"], "video", f"第{episode['idx']}集 · 成片",
@@ -948,6 +1042,32 @@ def generate_episode_final(eid: str):
         conn.execute("UPDATE episodes SET final_asset = ? WHERE id = ?", (asset["id"], eid))
         _touch(conn, project["id"])
         return {"asset": asset, "episode": _episode_dict(_episode_or_404(conn, eid))}
+
+
+@app.post("/api/episodes/{eid}/upload/music")
+async def upload_episode_music(eid: str, file: UploadFile = File(...)):
+    with db() as conn:
+        episode = _episode_or_404(conn, eid)
+        project = _project_or_404(conn, episode["project_id"])
+        data = await file.read()
+        if len(data) > 50 * 1024 * 1024:
+            raise HTTPException(400, "配乐文件超过 50MB")
+        ext = (file.filename or "music.mp3").rsplit(".", 1)[-1].lower()
+        mime = file.content_type or "audio/mpeg"
+        asset = _save_asset(conn, project["id"], "audio", f"配乐 · 第{episode['idx']}集",
+                            data, ext, mime, "upload")
+        conn.execute("UPDATE episodes SET bgm_asset = ? WHERE id = ?", (asset["id"], eid))
+        _touch(conn, project["id"])
+        return {"asset": asset, "episode": _episode_dict(_episode_or_404(conn, eid))}
+
+
+@app.delete("/api/episodes/{eid}/music")
+def delete_episode_music(eid: str):
+    with db() as conn:
+        episode = _episode_or_404(conn, eid)
+        conn.execute("UPDATE episodes SET bgm_asset = '' WHERE id = ?", (eid,))
+        _touch(conn, episode["project_id"])
+        return {"episode": _episode_dict(_episode_or_404(conn, eid))}
 
 
 @app.get("/api/shots/{sid}/video-status")
