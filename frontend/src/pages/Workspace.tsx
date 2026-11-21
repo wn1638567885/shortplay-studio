@@ -564,7 +564,7 @@ function StoryboardTab({
 
       {demoMode && (
         <div className="banner">
-          当前是演示模式：生成的画面是带提示词的分镜示意图，零调用成本。接入图像模型后会生成真实画面。
+          当前是演示模式：生成的画面是带提示词的分镜示意图，零调用成本。接入图像 / 视频模型后会生成真实画面与镜头视频。
           <button className="link-btn" onClick={openSettings}>
             去设置
           </button>
@@ -593,6 +593,7 @@ function StoryboardTab({
               run={run}
               reload={reload}
               notify={notify}
+              demoMode={demoMode}
             />
           ))}
         </div>
@@ -608,6 +609,7 @@ function ShotCard({
   run,
   reload,
   notify,
+  demoMode,
 }: {
   shot: Shot;
   ratio: string;
@@ -615,8 +617,11 @@ function ShotCard({
   run: (key: string, fn: () => Promise<any>, success?: string) => Promise<any>;
   reload: () => Promise<ProjectDetail>;
   notify: (msg: string, kind?: "ok" | "err") => void;
+  demoMode: boolean;
 }) {
+  const { openSettings } = useApp();
   const [editing, setEditing] = useState(false);
+  const [video, setVideo] = useState({ status: shot.video_status || "", progress: 0 });
   const [draft, setDraft] = useState({
     shot_type: shot.shot_type,
     camera: shot.camera,
@@ -639,6 +644,54 @@ function ShotCard({
 
   const genImage = () =>
     run(`img-${shot.id}`, () => apiClient.generateShotImage(shot.id), "画面已生成");
+
+  const videoStatus = video.status || shot.video_status;
+  const videoActive = ["queued", "in_progress", "processing"].includes(videoStatus);
+
+  useEffect(() => {
+    setVideo({ status: shot.video_status || "", progress: 0 });
+  }, [shot.id]);
+
+  useEffect(() => {
+    if (!videoActive) return;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const res = await apiClient.getShotVideoStatus(shot.id);
+        if (stopped) return;
+        setVideo({ status: res.status, progress: res.progress || 0 });
+        if (res.status === "completed") {
+          notify("镜头视频已生成", "ok");
+          await reload();
+        } else if (res.status === "failed") {
+          notify(res.message || "视频生成失败", "err");
+        }
+      } catch (err: any) {
+        if (!stopped) notify(err?.message || "查询视频状态失败", "err");
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 5000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [videoActive, shot.id]);
+
+  const genVideo = async () => {
+    if (demoMode) {
+      notify("演示模式不调用云端视频，请先在 AI 设置中接入文生视频模型", "err");
+      openSettings();
+      return;
+    }
+    const res = await run(`vid-${shot.id}`, () => apiClient.generateShotVideo(shot.id));
+    if (res?.status === "completed") {
+      notify("视频已生成", "ok");
+    } else if (res?.job_id) {
+      setVideo({ status: res.status || "queued", progress: res.progress || 0 });
+      notify("视频任务已提交，正在生成…", "ok");
+    }
+  };
 
   const save = async () => {
     await run(
@@ -730,9 +783,20 @@ function ShotCard({
         {shot.video_url && <video className="shot-video" src={shot.video_url} controls />}
         {shot.audio_url && <audio className="shot-audio" src={shot.audio_url} controls />}
 
+        {!shot.video_url && videoStatus && videoStatus !== "completed" && (
+          <div className={`video-status ${videoStatus === "failed" ? "failed" : ""}`}>
+            {videoStatus === "failed"
+              ? "视频生成失败，可重新尝试"
+              : `视频生成中${video.progress ? ` · ${video.progress}%` : "…"}`}
+          </div>
+        )}
+
         <div className="shot-actions">
           <button className="btn sm ghost" onClick={genImage} disabled={!!busy}>
             {busy === `img-${shot.id}` ? <Spinner /> : "🖼"} 生成画面
+          </button>
+          <button className="btn sm ghost" onClick={genVideo} disabled={!!busy || videoActive}>
+            {busy === `vid-${shot.id}` ? <Spinner /> : "🎥"} {shot.video_url ? "重生成视频" : "生成视频"}
           </button>
           <label className="btn sm ghost file-btn">
             上传素材

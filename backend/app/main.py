@@ -113,6 +113,7 @@ def _shot_dict(row) -> dict:
         "image_asset": row["image_asset"],
         "video_asset": row["video_asset"],
         "audio_asset": row["audio_asset"],
+        "video_status": row.get("video_status") or "",
         "image_url": f"/api/assets/{row['image_asset']}/raw" if row["image_asset"] else "",
         "video_url": f"/api/assets/{row['video_asset']}/raw" if row["video_asset"] else "",
         "audio_url": f"/api/assets/{row['audio_asset']}/raw" if row["audio_asset"] else "",
@@ -709,6 +710,128 @@ def generate_shot_voice(sid: str, request: Request):
         conn.execute("UPDATE shots SET audio_asset = ? WHERE id = ?", (asset["id"], sid))
         _touch(conn, project["id"])
         return {"asset": asset, "shot": _shot_dict(_shot_or_404_conn(conn, sid)), "source": "ai"}
+
+
+def _video_state(data: dict) -> tuple[str, int]:
+    raw = str(data.get("status") or "").lower()
+    status = {
+        "pending": "queued",
+        "created": "queued",
+        "processing": "in_progress",
+        "running": "in_progress",
+        "succeeded": "completed",
+        "success": "completed",
+        "done": "completed",
+        "error": "failed",
+        "cancelled": "failed",
+    }.get(raw, raw or "queued")
+    try:
+        progress = float(data.get("progress") or 0)
+    except (TypeError, ValueError):
+        progress = 0
+    if 0 < progress <= 1:
+        progress *= 100
+    return status, max(0, min(100, int(round(progress))))
+
+
+def _detect_video(data: bytes) -> tuple[str, str]:
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return "webm", "video/webm"
+    return "mp4", "video/mp4"
+
+
+def _store_video(conn, project: dict, shot: dict, content: bytes, sid: str) -> dict:
+    ext, mime = _detect_video(content)
+    asset = _save_asset(conn, project["id"], "video", f"AI视频 · 镜头{shot['idx']}",
+                        content, ext, mime, "ai")
+    conn.execute(
+        "UPDATE shots SET video_asset = ?, video_job = '', video_status = 'completed' WHERE id = ?",
+        (asset["id"], sid),
+    )
+    _touch(conn, project["id"])
+    return asset
+
+
+@app.post("/api/shots/{sid}/generate/video")
+def generate_shot_video(sid: str, request: Request):
+    cfg = cfg_of(request)
+    with db() as conn:
+        shot = _shot_or_404(conn, sid)
+        episode = _episode_or_404(conn, shot["episode_id"])
+        project = _project_or_404(conn, episode["project_id"])
+        if ai.is_demo(cfg):
+            raise HTTPException(400, "演示模式不调用云端视频。请在 AI 设置里填入支持文生视频的 OpenAI 兼容服务。")
+        base = shot["prompt"] or shot["description"] or shot["location"]
+        prompt = (
+            f"{base}。{project['style']}，{shot['shot_type']}，{shot['camera']}运镜，"
+            f"电影级质感，光影自然，竖屏 {project['ratio']} 短剧画面。"
+        )
+        try:
+            job = ai.create_video(cfg, prompt, float(shot["duration"] or 8), project["ratio"])
+        except ai.AIError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        job_id = str(job.get("id") or job.get("task_id") or job.get("video_id") or "")
+        if not job_id:
+            # 部分聚合站创建即返回可下载地址
+            url = str(job.get("url") or job.get("video_url") or job.get("download_url") or "")
+            if not url:
+                raise HTTPException(400, "视频接口没有返回任务 ID，请确认该服务兼容 Sora 式 /videos 协议")
+            try:
+                content = ai.download_video(cfg, "", url)
+            except ai.AIError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            asset = _store_video(conn, project, shot, content, sid)
+            return {"status": "completed", "progress": 100, "asset": asset, "message": "",
+                    "shot": _shot_dict(_shot_or_404_conn(conn, sid))}
+        status, progress = _video_state(job)
+        conn.execute("UPDATE shots SET video_job = ?, video_status = ? WHERE id = ?",
+                     (job_id, status, sid))
+        _touch(conn, project["id"])
+        return {"job_id": job_id, "status": status, "progress": progress, "message": "",
+                "shot": _shot_dict(_shot_or_404_conn(conn, sid))}
+
+
+@app.get("/api/shots/{sid}/video-status")
+def shot_video_status(sid: str, request: Request):
+    cfg = cfg_of(request)
+    with db() as conn:
+        shot = _shot_or_404(conn, sid)
+        episode = _episode_or_404(conn, shot["episode_id"])
+        project = _project_or_404(conn, episode["project_id"])
+        if ai.is_demo(cfg):
+            raise HTTPException(400, "演示模式不调用云端视频。请先在 AI 设置里接入文生视频模型。")
+        job_id = shot["video_job"]
+        if not job_id:
+            done = bool(shot["video_asset"])
+            return {"status": "completed" if done else (shot["video_status"] or ""),
+                    "progress": 100 if done else 0, "message": "",
+                    "shot": _shot_dict(shot)}
+        try:
+            data = ai.get_video(cfg, job_id)
+        except ai.AIError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        status, progress = _video_state(data)
+        asset = None
+        message = ""
+        if status == "completed":
+            url = str(data.get("url") or data.get("video_url") or data.get("download_url") or "")
+            try:
+                content = ai.download_video(cfg, job_id, url)
+            except ai.AIError as exc:
+                conn.execute("UPDATE shots SET video_job = '', video_status = 'failed' WHERE id = ?", (sid,))
+                _touch(conn, project["id"])
+                return {"status": "failed", "progress": progress, "message": str(exc),
+                        "shot": _shot_dict(_shot_or_404_conn(conn, sid))}
+            asset = _store_video(conn, project, shot, content, sid)
+        elif status == "failed":
+            message = str(data.get("error") or data.get("message") or "视频生成失败")
+            conn.execute("UPDATE shots SET video_job = '', video_status = 'failed' WHERE id = ?", (sid,))
+            _touch(conn, project["id"])
+        else:
+            conn.execute("UPDATE shots SET video_status = ? WHERE id = ?", (status, sid))
+            _touch(conn, project["id"])
+        return {"status": status, "progress": progress, "message": message, "asset": asset,
+                "shot": _shot_dict(_shot_or_404_conn(conn, sid))}
 
 
 @app.post("/api/shots/{sid}/upload")

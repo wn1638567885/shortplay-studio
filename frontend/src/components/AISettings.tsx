@@ -10,6 +10,7 @@ const PRESETS = [
     text_model: "gpt-4o-mini",
     image_model: "gpt-image-1",
     tts_model: "gpt-4o-mini-tts",
+    video_model: "sora-2",
   },
   {
     name: "DeepSeek（文本）",
@@ -17,6 +18,7 @@ const PRESETS = [
     text_model: "deepseek-chat",
     image_model: "gpt-image-1",
     tts_model: "gpt-4o-mini-tts",
+    video_model: "sora-2",
   },
   {
     name: "自定义中转",
@@ -24,6 +26,7 @@ const PRESETS = [
     text_model: "gpt-4o-mini",
     image_model: "gpt-image-1",
     tts_model: "gpt-4o-mini-tts",
+    video_model: "sora-2",
   },
 ];
 
@@ -77,6 +80,7 @@ export function AISettings({
       text_model: preset.text_model,
       image_model: preset.image_model,
       tts_model: preset.tts_model,
+      video_model: preset.video_model,
     });
     setTestResult(null);
   };
@@ -169,10 +173,19 @@ export function AISettings({
               spellCheck={false}
             />
           </Field>
+          <Field label="视频模型" hint="按镜头生成 4–12 秒片段，需支持 Sora 式 /videos 协议">
+            <input
+              value={config.video_model}
+              onChange={(e) => patch({ video_model: e.target.value })}
+              placeholder="sora-2"
+              spellCheck={false}
+            />
+          </Field>
         </div>
 
         <p className="notice">
           演示模式不会产生任何调用费用；分镜画面会生成带提示词的占位示意图，台词可用浏览器朗读免费试听。
+          视频生成需要自带密钥，演示模式下会直接提示且不发起任何调用。
         </p>
 
         {testResult && (

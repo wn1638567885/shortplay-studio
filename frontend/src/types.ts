@@ -6,6 +6,7 @@ export type AIConfig = {
   image_model: string;
   tts_model: string;
   tts_voice: string;
+  video_model: string;
 };
 
 export const DEFAULT_AI: AIConfig = {
@@ -16,6 +17,7 @@ export const DEFAULT_AI: AIConfig = {
   image_model: "gpt-image-1",
   tts_model: "gpt-4o-mini-tts",
   tts_voice: "alloy",
+  video_model: "sora-2",
 };
 
 export const GENRES = [
@@ -84,6 +86,7 @@ export type Shot = {
   image_asset: string;
   video_asset: string;
   audio_asset: string;
+  video_status: string;
   image_url: string;
   video_url: string;
   audio_url: string;

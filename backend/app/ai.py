@@ -7,6 +7,7 @@
 import base64
 import json
 import re
+from urllib.parse import quote
 
 import httpx
 
@@ -26,6 +27,7 @@ def decode_config(header_value: str | None) -> dict:
         "image_model": "gpt-image-1",
         "tts_model": "gpt-4o-mini-tts",
         "tts_voice": "alloy",
+        "video_model": "sora-2",
     }
     if not header_value:
         return cfg
@@ -188,6 +190,63 @@ def generate_speech(cfg: dict, text: str) -> bytes:
         raise AIError(f"网络请求失败：{exc}") from exc
     if resp.status_code >= 400:
         raise AIError(f"语音接口返回 {resp.status_code}：{resp.text[:300]}")
+    return resp.content
+
+
+def video_size(ratio: str) -> str:
+    # Sora 式接口目前只支持竖屏 720x1280 与横屏 1280x720
+    return "1280x720" if ratio in ("16:9", "4:3") else "720x1280"
+
+
+def video_seconds(duration: float) -> str:
+    # 上游只接受 4 / 8 / 12 秒，按镜头时长就近取档
+    if duration <= 6:
+        return "4"
+    if duration <= 10:
+        return "8"
+    return "12"
+
+
+def _get(cfg: dict, path: str, timeout: float = 30.0) -> dict:
+    try:
+        with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
+            resp = client.get(_endpoint(cfg, path), headers=_headers(cfg))
+    except httpx.HTTPError as exc:
+        raise AIError(f"网络请求失败：{exc}") from exc
+    if resp.status_code >= 400:
+        raise AIError(f"上游返回 {resp.status_code}：{resp.text[:300]}")
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise AIError("上游返回了无法解析的内容") from exc
+
+
+def create_video(cfg: dict, prompt: str, duration: float = 8.0, ratio: str = "9:16") -> dict:
+    payload = {
+        "model": cfg.get("video_model") or "sora-2",
+        "prompt": prompt[:2000],
+        "seconds": video_seconds(duration),
+        "size": video_size(ratio),
+    }
+    return _post(cfg, "videos", payload)
+
+
+def get_video(cfg: dict, job_id: str) -> dict:
+    return _get(cfg, f"videos/{quote(job_id, safe='')}")
+
+
+def download_video(cfg: dict, job_id: str, url: str = "") -> bytes:
+    target = url or _endpoint(cfg, f"videos/{quote(job_id, safe='')}/content")
+    headers = {} if url else _headers(cfg)
+    try:
+        with httpx.Client(timeout=httpx.Timeout(180.0, connect=20.0), follow_redirects=True) as client:
+            resp = client.get(target, headers=headers)
+    except httpx.HTTPError as exc:
+        raise AIError(f"下载生成视频失败：{exc}") from exc
+    if resp.status_code >= 400:
+        raise AIError(f"下载生成视频失败（{resp.status_code}）：{resp.text[:200]}")
+    if not resp.content:
+        raise AIError("视频接口返回了空内容")
     return resp.content
 
 

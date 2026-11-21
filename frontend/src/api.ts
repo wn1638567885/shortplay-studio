@@ -74,6 +74,15 @@ export const apiClient = {
     api<{ asset: Asset; character: Character; source: string; warning?: string }>(`/api/characters/${cid}/generate/image`, { method: "POST" }),
   generateVoice: (sid: string) =>
     api<{ asset: Asset; shot: Shot; source: string }>(`/api/shots/${sid}/generate/voice`, { method: "POST" }),
+  generateShotVideo: (sid: string) =>
+    api<{ job_id?: string; status: string; progress: number; message?: string; shot: Shot }>(
+      `/api/shots/${sid}/generate/video`,
+      { method: "POST" },
+    ),
+  getShotVideoStatus: (sid: string) =>
+    api<{ status: string; progress: number; message?: string; asset?: Asset; shot: Shot }>(
+      `/api/shots/${sid}/video-status`,
+    ),
   updateCharacter: (cid: string, body: Record<string, unknown>) =>
     api<Character>(`/api/characters/${cid}`, { method: "PATCH", body: JSON.stringify(body) }),
   createCharacter: (body: Record<string, unknown>) =>

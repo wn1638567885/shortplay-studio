@@ -1144,6 +1144,20 @@ button {
   background: #000;
 }
 
+.video-status {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #8ec5f0;
+  background: rgba(90, 169, 230, 0.12);
+}
+
+.video-status.failed {
+  color: #ff9b85;
+  background: rgba(255, 107, 74, 0.12);
+}
+
 .shot-audio {
   width: 100%;
   margin-top: 10px;

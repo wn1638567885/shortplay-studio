@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS shots (
     image_asset TEXT NOT NULL DEFAULT '',
     video_asset TEXT NOT NULL DEFAULT '',
     audio_asset TEXT NOT NULL DEFAULT '',
+    video_job TEXT NOT NULL DEFAULT '',
+    video_status TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -108,3 +110,8 @@ def init_db() -> None:
     os.makedirs(ASSET_DIR, exist_ok=True)
     with db() as conn:
         conn.executescript(SCHEMA)
+        # 老库平滑升级：补上视频任务字段
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(shots)").fetchall()}
+        for name in ("video_job", "video_status"):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE shots ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
