@@ -157,6 +157,16 @@ export function AISettings({
               spellCheck={false}
             />
           </Field>
+          <Field label="图像质量" hint="高质量更精致，单价更高；仅对支持的模型生效">
+            <select
+              value={config.image_quality || "high"}
+              onChange={(e) => patch({ image_quality: e.target.value })}
+            >
+              <option value="high">高（推荐，精品）</option>
+              <option value="medium">中</option>
+              <option value="low">低（省钱）</option>
+            </select>
+          </Field>
           <Field label="语音模型" hint="镜头台词配音（可选）">
             <input
               value={config.tts_model}

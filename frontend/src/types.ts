@@ -4,6 +4,7 @@ export type AIConfig = {
   api_key: string;
   text_model: string;
   image_model: string;
+  image_quality: string;
   tts_model: string;
   tts_voice: string;
   video_model: string;
@@ -15,6 +16,7 @@ export const DEFAULT_AI: AIConfig = {
   api_key: "",
   text_model: "gpt-4o-mini",
   image_model: "gpt-image-1",
+  image_quality: "high",
   tts_model: "gpt-4o-mini-tts",
   tts_voice: "alloy",
   video_model: "sora-2",

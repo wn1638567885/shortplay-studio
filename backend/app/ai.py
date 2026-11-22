@@ -25,6 +25,7 @@ def decode_config(header_value: str | None) -> dict:
         "api_key": "",
         "text_model": "gpt-4o-mini",
         "image_model": "gpt-image-1",
+        "image_quality": "high",
         "tts_model": "gpt-4o-mini-tts",
         "tts_voice": "alloy",
         "video_model": "sora-2",
@@ -143,12 +144,13 @@ def chat_text(cfg: dict, system: str, user: str) -> str:
 
 
 def image_size(ratio: str) -> str:
+    # gpt-image-1 仅支持 1024x1024 / 1024x1536 / 1536x1024 / auto
     return {
-        "9:16": "1024x1792",
-        "16:9": "1792x1024",
-        "4:3": "1024x1024",
+        "9:16": "1024x1536",
+        "16:9": "1536x1024",
+        "4:3": "1536x1024",
         "1:1": "1024x1024",
-    }.get(ratio, "1024x1792")
+    }.get(ratio, "1024x1536")
 
 
 def generate_image(cfg: dict, prompt: str, ratio: str = "9:16") -> bytes:
@@ -157,8 +159,11 @@ def generate_image(cfg: dict, prompt: str, ratio: str = "9:16") -> bytes:
         "prompt": prompt,
         "size": image_size(ratio),
         "n": 1,
+        "quality": cfg.get("image_quality") or "high",
     }
-    data = _post(cfg, "images/generations", {**payload, "response_format": "b64_json"}, retries=1)
+    # 不传 response_format：gpt-image-1 固定返回 b64_json（也不接受该参数），
+    # DALL-E / 中转默认返回 url，下方解析同时兼容两种返回。
+    data = _post(cfg, "images/generations", payload, retries=1)
     items = data.get("data") or []
     if not items:
         raise AIError("图像接口没有返回结果")
