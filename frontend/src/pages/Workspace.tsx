@@ -548,22 +548,20 @@ function StoryboardTab({
     run("board", () => apiClient.generateStoryboard(episode.id), "分镜已生成");
 
   const batchVideo = async () => {
-    if (demoMode) {
-      notify("演示模式不调用云端视频，请先在 AI 设置中接入文生视频模型", "err");
-      openSettings();
-      return;
-    }
     if (!episode.shots.length) {
       notify("这一集还没有分镜", "err");
       return;
     }
-    if (!window.confirm("将为该集还没有视频的镜头依次提交生成任务，继续？")) return;
+    const hint = demoMode
+      ? "将为该集还没有视频的镜头生成本地演示片段（不耗积分），继续？"
+      : "将为该集还没有视频的镜头依次提交生成任务，继续？";
+    if (!window.confirm(hint)) return;
     const res = await run("batch-video", () => apiClient.generateEpisodeVideos(episode.id));
     if (!res) return;
     if (res.errors?.length) {
-      notify(`已提交 ${res.submitted} 个，${res.errors.length} 个失败：${res.errors[0].message}`, "err");
+      notify(`已生成 ${res.submitted} 个，${res.errors.length} 个失败：${res.errors[0].message}`, "err");
     } else if (res.submitted) {
-      notify(`已提交 ${res.submitted} 个镜头视频任务，正在生成…`, "ok");
+      notify(demoMode ? `已生成 ${res.submitted} 个演示片段（不耗积分）` : `已提交 ${res.submitted} 个镜头视频任务，正在生成…`, "ok");
     } else {
       notify("该集所有镜头都已有视频或正在生成", "ok");
     }
@@ -740,6 +738,10 @@ function ShotCard({
   const genImage = () =>
     run(`img-${shot.id}`, () => apiClient.generateShotImage(shot.id), "画面已生成");
 
+  const genVoice = () =>
+    run(`voice-${shot.id}`, () => apiClient.generateVoice(shot.id),
+      demoMode ? "配音已生成（演示·不耗积分）" : "配音已生成");
+
   const videoStatus = video.status || shot.video_status;
   const videoActive = ["queued", "in_progress", "processing"].includes(videoStatus);
 
@@ -774,14 +776,9 @@ function ShotCard({
   }, [videoActive, shot.id]);
 
   const genVideo = async () => {
-    if (demoMode) {
-      notify("演示模式不调用云端视频，请先在 AI 设置中接入文生视频模型", "err");
-      openSettings();
-      return;
-    }
     const res = await run(`vid-${shot.id}`, () => apiClient.generateShotVideo(shot.id));
     if (res?.status === "completed") {
-      notify("视频已生成", "ok");
+      notify(demoMode ? "演示片段已生成（不耗积分）" : "视频已生成", "ok");
     } else if (res?.job_id) {
       setVideo({ status: res.status || "queued", progress: res.progress || 0 });
       notify("视频任务已提交，正在生成…", "ok");
@@ -900,6 +897,11 @@ function ShotCard({
           {shot.dialogue && (
             <button className="btn sm ghost" onClick={() => (speak(shot.dialogue) ? null : notify("浏览器不支持朗读", "err"))}>
               🔊 试听
+            </button>
+          )}
+          {shot.dialogue && (
+            <button className="btn sm ghost" onClick={genVoice} disabled={!!busy}>
+              {busy === `voice-${shot.id}` ? <Spinner /> : "🎙"} {shot.audio_url ? "重生成配音" : "生成配音"}
             </button>
           )}
           <button

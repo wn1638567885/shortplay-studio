@@ -716,7 +716,23 @@ def generate_shot_voice(sid: str, request: Request):
         if not shot["dialogue"]:
             raise HTTPException(400, "该镜头还没有台词")
         if ai.is_demo(cfg):
-            raise HTTPException(400, "演示模式不调用云端语音。可用「浏览器朗读」免费试听台词。")
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                raise HTTPException(400, "服务器未安装 ffmpeg，暂时无法生成配音")
+            with tempfile.TemporaryDirectory() as tmp:
+                wav = _demo_voice_wav(shot["dialogue"], tmp)
+                if not wav:
+                    raise HTTPException(400, "演示配音需要服务器安装 espeak-ng；可改用「浏览器朗读」免费试听")
+                mp3 = os.path.join(tmp, "voice.mp3")
+                _run_ffmpeg([ffmpeg, "-y", "-i", wav, "-c:a", "libmp3lame", "-b:a", "128k", mp3], tmp)
+                with open(mp3, "rb") as fh:
+                    data = fh.read()
+            asset = _save_asset(conn, project["id"], "audio", f"配音 · 镜头{shot['idx']}",
+                                data, "mp3", "audio/mpeg", "demo")
+            conn.execute("UPDATE shots SET audio_asset = ? WHERE id = ?", (asset["id"], sid))
+            _touch(conn, project["id"])
+            return {"asset": asset, "shot": _shot_dict(_shot_or_404_conn(conn, sid)),
+                    "source": "demo", "warning": "演示模式使用本地机械音，不消耗任何积分"}
         try:
             data = ai.generate_speech(cfg, shot["dialogue"])
         except ai.AIError as exc:
@@ -839,6 +855,121 @@ def _detect_video(data: bytes) -> tuple[str, str]:
     return "mp4", "video/mp4"
 
 
+def _ffmpeg_ok(args: list[str], cwd: str) -> bool:
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _asset_path(conn, asset_id: str) -> str:
+    if not asset_id:
+        return ""
+    row = conn.execute("SELECT filename FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    if not row:
+        return ""
+    path = os.path.join(ASSET_DIR, row["filename"])
+    return path if os.path.exists(path) else ""
+
+
+def _cjk_font_file() -> str:
+    try:
+        proc = subprocess.run(["fc-match", "-f", "%{file}", "Noto Sans CJK SC"],
+                              capture_output=True, text=True, timeout=15)
+        path = (proc.stdout or "").strip()
+        if path and os.path.exists(path):
+            return path
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for base in ("/usr/share/fonts", "/usr/local/share/fonts", "/System/Library/Fonts"):
+        if not os.path.isdir(base):
+            continue
+        for dirpath, _d, files in os.walk(base):
+            for f in files:
+                low = f.lower()
+                if ("noto" in low or "cjk" in low or "wqy" in low) and low.endswith((".otf", ".ttf", ".ttc")):
+                    return os.path.join(dirpath, f)
+    return ""
+
+
+def _clean_dialogue(text: str) -> str:
+    return re.sub(r"[（(][^）)]*[）)]", "", (text or "")).strip()
+
+
+def _demo_voice_wav(text: str, tmp: str) -> str:
+    espeak = shutil.which("espeak-ng") or shutil.which("espeak")
+    clean = _clean_dialogue(text)
+    if not espeak or not clean:
+        return ""
+    txt_path = os.path.join(tmp, "voice.txt")
+    out = os.path.join(tmp, "voice.wav")
+    with open(txt_path, "w", encoding="utf-8") as fh:
+        fh.write(clean)
+    try:
+        proc = subprocess.run([espeak, "-v", "cmn", "-s", "160", "-f", txt_path, "-w", out],
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+        return ""
+    return out
+
+
+def _drawtext_escape(text: str) -> str:
+    return (text or "").replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+
+def _make_demo_video_bytes(project: dict, shot: dict, image_path: str, voice_wav: str, tmp: str) -> bytes:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(400, "服务器未安装 ffmpeg，暂时无法生成视频")
+    width, height = _RATIO_SIZE.get(project.get("ratio") or "9:16", (720, 1280))
+    duration = max(1.0, min(12.0, float(shot.get("duration") or 4)))
+    font = _cjk_font_file()
+    frames = max(1, int(round(duration * 30)))
+    vf = (f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+          f"crop={width}:{height},"
+          f"zoompan=z='min(zoom+0.0015,1.12)':d={frames}:s={width}x{height}:fps=30")
+    if font:
+        badge = f"演示片段 · 镜头 {int(shot.get('idx') or 0):02d}"
+        fs = max(22, int(round(height * 0.028)))
+        vf += (f",drawtext=fontfile='{font}':text='{_drawtext_escape(badge)}':x=36:y=36:"
+               f"fontsize={fs}:fontcolor=white:box=1:boxcolor=black@0.45:boxborderw=10")
+        desc = (shot.get("description") or "").strip()
+        if desc:
+            dfs = max(20, int(round(height * 0.038)))
+            limit = max(6, int((width - 80) / dfs))
+            desc = desc[:limit]
+            vf += (f",drawtext=fontfile='{font}':text='{_drawtext_escape(desc)}':"
+                   f"x=(w-text_w)/2:y=(h-text_h)/2:fontsize={dfs}:"
+                   f"fontcolor=white:box=1:boxcolor=black@0.30:boxborderw=18")
+    use_image = bool(image_path) and not image_path.lower().endswith(".svg")
+    silent = os.path.join(tmp, "silent.mp4")
+    args = [ffmpeg, "-y"]
+    if use_image:
+        args += ["-loop", "1", "-i", image_path]
+    else:
+        genre = demo.GENRES.get(project.get("genre") or "", demo.GENRES.get("都市逆袭", {}))
+        color = (genre.get("color") or "0x2a3a5a").lstrip("#")
+        args += ["-f", "lavfi", "-i", f"color=c=0x{color}:s={width}x{height}:d={duration}"]
+    args += ["-t", str(duration), "-vf", vf, "-r", "30",
+             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+             "-pix_fmt", "yuv420p", "-an", silent]
+    _run_ffmpeg(args, tmp)
+    if voice_wav:
+        final = os.path.join(tmp, "clip.mp4")
+        _run_ffmpeg([ffmpeg, "-y", "-i", silent, "-i", voice_wav,
+                     "-filter_complex",
+                     f"[1:a]apad=whole_dur={duration:.3f},atrim=0:{duration:.3f},aresample=44100[a]",
+                     "-map", "0:v:0", "-map", "[a]", "-c:v", "copy",
+                     "-c:a", "aac", "-b:a", "128k", "-t", f"{duration:.3f}", final], tmp)
+    else:
+        final = silent
+    with open(final, "rb") as fh:
+        return fh.read()
+
+
 def _video_prompt(project: dict, shot: dict) -> str:
     base = shot["prompt"] or shot["description"] or shot["location"]
     return (
@@ -847,10 +978,12 @@ def _video_prompt(project: dict, shot: dict) -> str:
     )
 
 
-def _store_video(conn, project: dict, shot: dict, content: bytes, sid: str) -> dict:
+def _store_video(conn, project: dict, shot: dict, content: bytes, sid: str,
+                 source: str = "ai") -> dict:
     ext, mime = _detect_video(content)
-    asset = _save_asset(conn, project["id"], "video", f"AI视频 · 镜头{shot['idx']}",
-                        content, ext, mime, "ai")
+    label = "演示片段" if source == "demo" else "AI视频"
+    asset = _save_asset(conn, project["id"], "video", f"{label} · 镜头{shot['idx']}",
+                        content, ext, mime, source)
     conn.execute(
         "UPDATE shots SET video_asset = ?, video_job = '', video_status = 'completed' WHERE id = ?",
         (asset["id"], sid),
@@ -867,7 +1000,14 @@ def generate_shot_video(sid: str, request: Request):
         episode = _episode_or_404(conn, shot["episode_id"])
         project = _project_or_404(conn, episode["project_id"])
         if ai.is_demo(cfg):
-            raise HTTPException(400, "演示模式不调用云端视频。请在 AI 设置里填入支持文生视频的 OpenAI 兼容服务。")
+            with tempfile.TemporaryDirectory() as tmp:
+                image_path = _asset_path(conn, shot["image_asset"])
+                voice_wav = _demo_voice_wav(shot["dialogue"], tmp)
+                data = _make_demo_video_bytes(project, shot, image_path, voice_wav, tmp)
+            asset = _store_video(conn, project, shot, data, sid, source="demo")
+            return {"status": "completed", "progress": 100, "asset": asset,
+                    "message": "演示片段已生成（不消耗积分）",
+                    "shot": _shot_dict(_shot_or_404_conn(conn, sid))}
         prompt = _video_prompt(project, shot)
         try:
             job = ai.create_video(cfg, prompt, float(shot["duration"] or 8), project["ratio"])
@@ -900,8 +1040,6 @@ def generate_episode_videos(eid: str, request: Request):
     with db() as conn:
         episode = _episode_or_404(conn, eid)
         project = _project_or_404(conn, episode["project_id"])
-        if ai.is_demo(cfg):
-            raise HTTPException(400, "演示模式不调用云端视频。请在 AI 设置里填入支持文生视频的 OpenAI 兼容服务。")
         shots = [dict(row) for row in conn.execute(
             "SELECT * FROM shots WHERE episode_id = ? ORDER BY idx", (eid,)
         ).fetchall()]
@@ -913,6 +1051,17 @@ def generate_episode_videos(eid: str, request: Request):
         for shot in shots:
             if shot["video_asset"] or shot["video_job"]:
                 skipped += 1
+                continue
+            if ai.is_demo(cfg):
+                try:
+                    with tempfile.TemporaryDirectory() as tmp:
+                        image_path = _asset_path(conn, shot["image_asset"])
+                        voice_wav = _demo_voice_wav(shot["dialogue"], tmp)
+                        data = _make_demo_video_bytes(project, shot, image_path, voice_wav, tmp)
+                    _store_video(conn, project, shot, data, shot["id"], source="demo")
+                    submitted += 1
+                except HTTPException as exc:
+                    errors.append({"shot_idx": shot["idx"], "message": str(exc.detail)})
                 continue
             try:
                 job = ai.create_video(cfg, _video_prompt(project, shot),
@@ -968,7 +1117,7 @@ def generate_episode_final(eid: str, payload: dict | None = Body(None)):
             path = os.path.join(ASSET_DIR, asset["filename"]) if asset else ""
             if not path or not os.path.exists(path):
                 raise HTTPException(400, f"镜头{shot['idx']}的视频文件已丢失，请重新生成或上传")
-            paths.append(path)
+            paths.append((path, _asset_path(conn, shot["audio_asset"])))
         bgm_path = ""
         if episode.get("bgm_asset"):
             bgm = conn.execute("SELECT * FROM assets WHERE id = ?", (episode["bgm_asset"],)).fetchone()
@@ -979,21 +1128,29 @@ def generate_episode_final(eid: str, payload: dict | None = Body(None)):
         with tempfile.TemporaryDirectory() as tmp:
             normalized = []
             durations = []
-            for i, src in enumerate(paths, start=1):
+            vf = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                  f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30")
+            for i, (src, voice_path) in enumerate(paths, start=1):
                 dst = os.path.join(tmp, f"seg_{i:03d}.mp4")
+                common = ["-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                          "-pix_fmt", "yuv420p"]
                 args = [ffmpeg, "-y", "-i", src]
-                if ffprobe and _has_audio(src):
+                if voice_path:
+                    dur = _media_duration(src) or float(shots[i - 1].get("duration") or 4)
+                    args += ["-i", voice_path, "-filter_complex",
+                             f"[1:a]apad=whole_dur={dur:.3f},atrim=0:{dur:.3f},aresample=44100[a]",
+                             "-map", "0:v:0", "-map", "[a]"]
+                    args += common + ["-c:a", "aac", "-b:a", "128k", "-t", f"{dur:.3f}", dst]
+                elif ffprobe and _has_audio(src):
                     args += ["-map", "0:v:0", "-map", "0:a:0"]
+                    args += common + ["-c:a", "aac", "-b:a", "128k", dst]
                 elif ffprobe:
                     args += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                              "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
-                args += [
-                    "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                           f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
-                    dst,
-                ]
+                    args += common + ["-c:a", "aac", "-b:a", "128k", dst]
+                else:
+                    args += ["-map", "0:v:0"]
+                    args += common + [dst]
                 _run_ffmpeg(args, tmp)
                 normalized.append(dst)
                 durations.append(_media_duration(dst))
